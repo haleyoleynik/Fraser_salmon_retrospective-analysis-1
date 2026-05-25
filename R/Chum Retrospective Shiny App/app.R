@@ -1,3 +1,7 @@
+# Chum retrospective policy analysis shiny app 
+# Haley Oleynik
+# Feb 2026
+
 library(shiny)
 library(tidyverse)
 library(readr)
@@ -116,7 +120,7 @@ ui <- fluidPage(
       
       sliderInput("cslope", "HCR slope",
                   min = 0, max = 1, value = 0.8, step = 0.05),
-                  helpText("Controls how aggressively harvest rate increases once run size exceeds the conservation minimum
+      helpText("Controls how aggressively harvest rate increases once run size exceeds the conservation minimum
            Also sets the maximum U at very large run sizes."),
       
       sliderInput("util_exp", "Utility exponent",
@@ -127,7 +131,7 @@ ui <- fluidPage(
     ),
     
     mainPanel(
-      tableOutput("policyTable"),
+      verbatimTextOutput("policySummary"),
       verbatimTextOutput("lossText"),
       verbatimTextOutput("lossHCRText"),
       
@@ -141,8 +145,8 @@ ui <- fluidPage(
       
       plotOutput("utilityPlot", height = 300),
       plotOutput("Uplot", height = 350)
-    
-    
+      
+      
     )
     
   )
@@ -171,13 +175,17 @@ server <- function(input, output) {
                             aa = aa, bb = bb,
                             util_exp = input$util_exp)
     
-    # maxU <- simulate_policy(dat, "hcr",
-    #                         cslope = input$cslope_maxU,   # separate slider
-    #                         nlim   = input$nlim,
-    #                         aa = aa, bb = bb,
-    #                         util_exp = input$util_exp)
+    maxU <- simulate_policy(
+      dat,
+      umethod = "hcr",
+      cslope = 0.7763355348064025,
+      nlim   = 487692.7340110076,
+      aa = aa,
+      bb = bb,
+      util_exp = input$util_exp
+    )
     
-    list(hist = hist, const = const, maxY = maxY)#, maxU = maxU)
+    list(hist = hist, const = const, maxY = maxY, maxU = maxU)
   })
   
   policy_summary <- reactive({
@@ -186,9 +194,14 @@ server <- function(input, output) {
       Historical = summarize_policy(sims()$hist),
       ConstU     = summarize_policy(sims()$const),
       MaxY       = summarize_policy(sims()$maxY),
-      #MaxU       = summarize_policy(sims()$maxU),
+      MaxU       = summarize_policy(sims()$maxU),
       .id = "Policy"
     )
+    pol <- pol %>%
+      mutate(
+        rel_yield   = total_yield / max(total_yield, na.rm = TRUE),
+        rel_utility = utility     / max(utility, na.rm = TRUE)
+      )
     
     pol
   })
@@ -224,13 +237,14 @@ server <- function(input, output) {
     pol <- policy_summary()
     
     hist_yield <- pol$total_yield[pol$Policy == "Historical"]
-    hcr_yield  <- pol$total_yield[pol$Policy == "HCR"]
+    hcr_yield  <- pol$total_yield[pol$Policy == "MaxY"]
     
     loss <- hcr_yield - hist_yield
     
     paste0("Loss (HCR − Historical): ",
            format(round(loss, 0), big.mark = ","))
   })
+  
   
   
   # ---- Utility vs Yield plot ----
@@ -240,33 +254,32 @@ server <- function(input, output) {
     
     pol <- policy_summary()
     
-    pol_norm <- pol %>%
-      mutate(
-        rel_yield   = total_yield / max(total_yield, na.rm = TRUE),
-        rel_utility = utility     / max(utility, na.rm = TRUE)
-      )
-    
-    ggplot(pol_norm,
+    ggplot(pol,
            aes(rel_yield, rel_utility,
                colour = Policy,
                label = Policy)) +
+      
       geom_point(size = 4) +
       geom_text(nudge_y = 0.02, show.legend = FALSE) +
+      
       scale_colour_manual(values = c(
         Historical = "steelblue",
         ConstU     = "goldenrod",
         MaxY       = "black",
-        #MaxU       = "purple",
+        MaxU       = "red"
       )) +
+      
       labs(
         x = "Relative Yield",
         y = "Relative Utility",
         colour = "Policy",
         title = "Utility vs Yield Tradeoff"
       ) +
+      
       theme_minimal(base_size = 14) +
       theme(legend.position = "right")
   })
+  
   
   
   
@@ -277,7 +290,7 @@ server <- function(input, output) {
     hist  <- sims()$hist  %>% mutate(Policy = "Historical")
     const <- sims()$const %>% mutate(Policy = "ConstU")
     maxY  <- sims()$maxY  %>% mutate(Policy = "HCR")
-
+    
     combined <- bind_rows(hist, const, maxY)
     
     ggplot(combined,
@@ -384,18 +397,20 @@ server <- function(input, output) {
   })
   
   
+  output$policySummary <- renderPrint({
+    policy_summary()
+  })
   
-  
-  
-  output$policyTable <- renderTable({
-    
-    policy_summary() %>%
-      mutate(
-        total_yield = round(total_yield, 0),
-        utility     = round(utility, 0)
-      )
-    
-  }, striped = TRUE, bordered = TRUE)
+  # as a table 
+  # output$policyTable <- renderTable({
+  #   
+  #   policy_summary() %>%
+  #     mutate(
+  #       total_yield = round(total_yield, 0),
+  #       utility     = round(utility, 0)
+  #     )
+  #   
+  # }, striped = TRUE, bordered = TRUE)
   
   
 }

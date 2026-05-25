@@ -4,7 +4,7 @@ library(tidyverse)
 library(slider)
 
 #-------------------------------
-# Model runner (wraps your script)
+# Model runner (wraps  script)
 #-------------------------------
 run_model <- function(
     U_apply = 0.2,

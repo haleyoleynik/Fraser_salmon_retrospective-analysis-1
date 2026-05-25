@@ -1,3 +1,7 @@
+# Sockeye retrospective shiny app 
+# Haley Oleynik 
+# February 2026
+
 library(shiny)
 library(dplyr)
 library(tidyr)
@@ -128,15 +132,18 @@ ui <- fluidPage(
     ),
     
     mainPanel(
-      h4("Total catch across all stocks"),
+      h4("Total catch"),
       verbatimTextOutput("total_summary"),
       
       plotOutput("catch_plot", height = 300),
       plotOutput("return_plot", height = 300),
       plotOutput("esc_plot", height = 300),
       
-      h4("Stock Summary"),
-      tableOutput("stock_table")
+      h4("Time Series"),
+      tableOutput("retro_ts_table")
+      
+      #h4("Stock Summary"),
+      #tableOutput("stock_table")
     )
   )
 )
@@ -188,6 +195,21 @@ server <- function(input, output, session) {
     }
   })
   
+  # ---- Retro Time Series Table ----
+  output$retro_ts_table <- renderTable({
+    
+    df <- summed_ts() %>%
+      select(Year, retroR, retroC, Run = RunJacks) %>%
+      arrange(Year) %>%
+      mutate(
+        retroR = round(retroR, 0),
+        retroC = round(retroC, 0),
+        Run = round(Run, 0)
+      )
+    
+    df
+  })
+  
   
   # ---- Total Summary ----
   output$total_summary <- renderPrint({
@@ -209,35 +231,46 @@ server <- function(input, output, session) {
   
   
   # ---- Aggregate Timeseries (summed across stocks) ----
+# summed_ts <- reactive({
+# 
+#   out <- filtered_model()
+# 
+#   out %>%
+#     group_by(Year) %>%
+#     summarise(
+#       Catch = sum(Catch, na.rm=TRUE),
+#       retroC = sum(retroC, na.rm=TRUE),
+#       RunJacks = sum(RunJacks, na.rm=TRUE),
+#       retroR = sum(retroR, na.rm=TRUE),
+#       AdultEscapement = sum(AdultEscapement, na.rm=TRUE),
+#       retroS = sum(retroS, na.rm=TRUE),
+#       .groups="drop"
+#     ) %>%
+#     arrange(Year) %>%
+#     mutate(
+#       AdultReturn = lead(RunJacks, LAG_YEARS)
+#     )
+# })
+  
   summed_ts <- reactive({
     
     out <- filtered_model()
     
-    if (input$stock_choice == "All Stocks") {
-      out %>%
-        group_by(Year) %>%
-        summarise(
-          Catch = sum(Catch, na.rm=TRUE),
-          retroC = sum(retroC, na.rm=TRUE),
-          AdultReturn = sum(AdultReturn, na.rm=TRUE),
-          retroR = sum(retroR, na.rm=TRUE),
-          AdultEscapement = sum(AdultEscapement, na.rm=TRUE),
-          retroS = sum(retroS, na.rm=TRUE),
-          .groups="drop"
-        )
-    } else {
-      out %>%
-        group_by(Year) %>%
-        summarise(
-          Catch = sum(Catch, na.rm=TRUE),
-          retroC = sum(retroC, na.rm=TRUE),
-          AdultReturn = sum(AdultReturn, na.rm=TRUE),
-          retroR = sum(retroR, na.rm=TRUE),
-          AdultEscapement = sum(AdultEscapement, na.rm=TRUE),
-          retroS = sum(retroS, na.rm=TRUE),
-          .groups="drop"
-        )
-    }
+    out %>%
+      group_by(Year) %>%
+      summarise(
+        Catch = sum(Catch, na.rm=TRUE),
+        retroC = sum(retroC, na.rm=TRUE),
+        RunJacks = sum(RunJacks, na.rm=TRUE),
+        retroR = sum(retroR, na.rm=TRUE),
+        AdultEscapement = sum(AdultEscapement, na.rm=TRUE),
+        retroS = sum(retroS, na.rm=TRUE),
+        .groups="drop"
+      ) %>%
+      arrange(Year) %>%
+      mutate(
+        AdultReturn = lead(RunJacks, LAG_YEARS)
+      )
   })
   
   
@@ -265,14 +298,14 @@ server <- function(input, output, session) {
     df <- summed_ts()
     
     plot_df <- df %>%
-      select(Year, AdultReturn, retroR) %>%
+      select(Year, AdultReturns = RunJacks, retroR) %>%
       pivot_longer(-Year)
     
     ggplot(plot_df,
            aes(Year, value, color=name,linetype=name)) +
       geom_line(linewidth=1.2) +
-      labs(title="Returns",
-           y="Adult Return",
+      labs(title="Return",
+           y="Returns",
            color = "") +
       guides(linetype = "none") +
       scale_color_manual(values = c("#4682B4","#FF4500")) +
