@@ -9,7 +9,7 @@ require(readr)
 require(slider)
 
 # read data ------------------
-data <- read_csv("data/s-r_data.csv")
+data <- read_csv("data/s-r_data.csv") %>% select(-SSL)
 sh_data <- read_csv("data/sh_s-r_data.csv")
 covariates <- read_csv("data/covariates.csv")
 
@@ -32,6 +32,8 @@ spawners_coef = -4.95E-07
 U_apply = 0.2
 bycatch_rate = 0.67
 SSL_control = 0 
+
+data$SSL
 
 # mutate dataframe with calculations from exel 
 new.data <- data %>%
