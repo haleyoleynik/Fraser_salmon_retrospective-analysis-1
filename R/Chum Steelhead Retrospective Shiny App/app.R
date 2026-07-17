@@ -1,5 +1,5 @@
 # Retrospective Model - Shiny App
-# Based on Haley Oleynik Murdoch McAllister's chum/steelhead retrospective model
+# Based on Haley Oleynik Murdoch McAllister's chum/steelhead retrospective mode
 # Toggle U_apply, bycatch_rate, and SSL_control reactively
 
 library(shiny)
@@ -131,7 +131,9 @@ run_model <- function(U_apply, bycatch_rate, SSL_control, U_historic) {
     if (i > 5) df$Nage5_alt[i] <- df$chum_recruits_alt[i - 5] * df$prop5[i]
     if (i > 6) df$Nage6_alt[i] <- df$chum_recruits_alt[i - 6] * df$prop6[i]
     
-    df$sum_alt[i] <- sum(df$Nage3_alt[i], df$Nage4_alt[i], df$Nage5_alt[i], df$Nage6_alt[i], na.rm = TRUE)
+    df$sum_alt[i] <- if (all(is.na(c(df$Nage3_alt[i], df$Nage4_alt[i], df$Nage5_alt[i], df$Nage6_alt[i]))))
+      NA_real_ else
+        sum(df$Nage3_alt[i], df$Nage4_alt[i], df$Nage5_alt[i], df$Nage6_alt[i], na.rm = TRUE)
     df$catch_alt[i] <- df$sum_alt[i] * df$chum_commercial_harvest_uapply[i]
     df$chum_spawners_pred[i] <- max(df$sum_alt[i] * (1 - df$chum_commercial_harvest_uapply[i]), 0)
   }

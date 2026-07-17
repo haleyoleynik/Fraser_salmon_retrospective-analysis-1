@@ -1,0 +1,46 @@
+# Estimates slope, intercept, SE for linear model fitted to data
+# Chum salmon stock-recruit using spawner as covariate
+model{
+
+#priors
+slope ~ dunif(0.00001, 1000)      # max smax of 100,000
+intercept ~ dnorm(0, 0.000001)    # prior SD = 1000
+LSE ~ dunif(LminSE, LmaxSE)       # quasi noninformative prior
+LminSE <- log(0.01)               # this is uniform on the log of SE
+LmaxSE <- log(10)                 # range done in orders of magnitude
+SE <- exp(LSE)                    # standard error is a nuisance scale parameter
+tau <- 1/(SE*SE)
+PPslope <- step(intercept)        # average of this gives prob(intercept)>0
+a <- intercept
+b <- slope
+s ~ dnorm(0, 0.0001)
+t ~ dnorm(0, 0.0001)
+p ~ dnorm(0, 0.0001)
+q ~ dnorm(0, 0.0001)
+pvalues <- step(-s)    # probability s < 0
+pvaluet <- step(t)     # probability t > 0
+pvaluep <- step(-p)    # probability p < 0
+pvalueq <- step(q)     # probability q > 0
+smax <- 1/b            # spawners producing maximum recruitment
+
+# compute probability of the ln(R/S) data
+for(i in 1:ndata) {
+  lnrs_pred[i] <- a - b*sp[i] + s * SSL[i] + t * PDOA[i] + p * PDOJ[i] + q * NPGO[i]
+  # predicted ln(R/S)
+  lnrs[i] ~ dnorm(lnrs_pred[i], tau)         # prob. of each data point
+  # lnrs_rep is a random variable, a new probabilistic node
+  lnrs_rep[i] ~ dnorm(lnrs_pred[i], tau)     # impute lnrs observation
+  pvalue[i] <- step(lnrs_rep[i] - lnrs[i])   # store a 1 when >0, else 0
+  ayst[i] <- a + s * SSL[i] + t * PDOA[i] + p * PDOJ[i] + q * NPGO[i]
+  # productivity is time varying with sr
+  cstx[i] <- ayst[i]/b                       # calc. carrying capacity
+  cst[i] <- max(cstx[i], 0.01)
+  smsystx[i] <- cst[i] * (0.5 - 0.07*ayst[i])  # calc Smsy
+  smsyst[i] <- max(smsystx[i], 0.01)
+  rmsyst[i] <- smsyst[i] * exp(ayst[i] - b * smsyst[i])  # r at msy
+  msyst[i] <- rmsyst[i] - smsyst[i]          # msy
+  umsystx[i] <- msyst[i]/ rmsyst[i]          # harvest rate at msy
+  umsyst[i] <- max(umsystx[i], 0.001)
+}
+
+}
