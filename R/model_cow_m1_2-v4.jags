@@ -15,23 +15,23 @@ a <- intercept
 b <- slope
 s ~ dnorm(0, 0.0001)
 t ~ dnorm(0, 0.0001)
-p ~ dnorm(0, 0.0001)
-q ~ dnorm(0, 0.0001)
+# p ~ dnorm(0, 0.0001)
+# q ~ dnorm(0, 0.0001)
 pvalues <- step(-s)    # probability s < 0
 pvaluet <- step(t)     # probability t > 0
-pvaluep <- step(-p)    # probability p < 0
-pvalueq <- step(q)     # probability q > 0
+# pvaluep <- step(-p)    # probability p < 0
+# pvalueq <- step(q)     # probability q > 0
 smax <- 1/b            # spawners producing maximum recruitment
 
 # compute probability of the ln(R/S) data
 for(i in 1:ndata) {
-  lnrs_pred[i] <- a - b*sp[i] + s * SSL[i] + t * PDOA[i] + p * PDOJ[i] + q * NPGO[i]
+  lnrs_pred[i] <- a - b*sp[i] + s * SSL[i] + t * PDO[i] 
   # predicted ln(R/S)
   lnrs[i] ~ dnorm(lnrs_pred[i], tau)         # prob. of each data point
   # lnrs_rep is a random variable, a new probabilistic node
   lnrs_rep[i] ~ dnorm(lnrs_pred[i], tau)     # impute lnrs observation
   pvalue[i] <- step(lnrs_rep[i] - lnrs[i])   # store a 1 when >0, else 0
-  ayst[i] <- a + s * SSL[i] + t * PDOA[i] + p * PDOJ[i] + q * NPGO[i]
+  ayst[i] <- a + s * SSL[i] + t * PDO[i] 
   # productivity is time varying with sr
   cstx[i] <- ayst[i]/b                       # calc. carrying capacity
   cst[i] <- max(cstx[i], 0.01)
