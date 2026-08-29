@@ -571,7 +571,6 @@ ggplot(mc_summary_stats_ratio, aes(x = Stock, y = median, color = scenario)) +
 ggsave("figures/sockeye_ratio_v3.png", width = 13, height = 6.5, dpi = 600)
 
 # histogram of draws -------------------------------
-# histogram ---------------
 lowpoint_summary %>%
   filter(!runaway) %>%
   ggplot(aes(ratio, fill = scenario)) +
