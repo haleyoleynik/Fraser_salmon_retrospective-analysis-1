@@ -429,3 +429,54 @@ ggplot(ayst_all, aes(Year, mean)) +
   theme_minimal()
 
 ggsave("figures/steelhead_chum_productivity.png", width = 8, height = 10, dpi = 600)
+
+
+# SAVE trace plots -- intercept + spawners beta + covariate coefficients,
+# steelhead & chum -- with panels relabeled to the real covariate names
+
+steelhead_chum_fits <- list(
+  Chilcotin = chilcotin_samples_kept,   # s = SL, t = SST
+  Thompson  = thompson_samples_kept,    # s = SL, t = SST
+  Chum      = chum_samples_kept         # s = SL, t = PDO
+)
+
+# What each raw parameter name (intercept, b, s, t) actually represents,
+# per stock -- used to relabel the trace/density panel titles directly,
+# not just the filename
+param_labels <- list(
+  Chilcotin = c(intercept = "Intercept", b = "Spawners beta (b)", s = "SL", t = "SST"),
+  Thompson  = c(intercept = "Intercept", b = "Spawners beta (b)", s = "SL", t = "SST"),
+  Chum      = c(intercept = "Intercept", b = "Spawners beta (b)", s = "SL", t = "PDO")
+)
+
+for (stock_name in names(steelhead_chum_fits)) {
+  
+  samples <- steelhead_chum_fits[[stock_name]]
+  all_names <- varnames(samples)
+  
+  coef_names <- c("intercept", "b", "s", "t")
+  coef_names <- coef_names[coef_names %in% all_names]
+  
+  sub_samples <- samples[, coef_names]
+  
+  # Relabel each chain's columns to the real covariate names, so the
+  # actual plot panels (not just the filename) show what's being traced
+  new_labels <- unname(param_labels[[stock_name]][coef_names])
+  for (j in seq_along(sub_samples)) {
+    colnames(sub_samples[[j]]) <- new_labels
+  }
+  
+  covariate_suffix <- paste(param_labels[[stock_name]][c("s", "t")], collapse = "_")
+  filename <- paste0(stock_name, "_intercept_spawnersB_", covariate_suffix, ".png")
+  
+  png(
+    filename = file.path("Figures/diagnostics", filename),
+    width = 2000,
+    height = 3000,
+    res = 300
+  )
+  
+  plot(sub_samples)
+  
+  dev.off()
+}
