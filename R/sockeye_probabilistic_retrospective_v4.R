@@ -36,7 +36,7 @@ library(tidyverse)
 library(coda)
 
 set.seed(2026)
-N_DRAWS <- 50   # start small
+N_DRAWS <- 5000  
 FINAL_PERIOD_YEARS <- 10
 LOW_PERIOD_YEARS <- 10
 RUNAWAY_MULTIPLE <- 10
@@ -497,6 +497,19 @@ lowpoint_summary %>%
   theme(legend.position = "bottom")
 
 ggsave("figures/sockeye_draws_hist.png", width = 12, height = 6.5, dpi = 600)
+
+lowpoint_summary %>%
+  filter(!runaway) %>%
+  ggplot(aes(ratio, fill = scenario)) +
+  geom_histogram(bins = 20, alpha = 0.6, position = "identity", color = "white") +
+  #geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
+  scale_fill_manual(values = SCENARIO_COLORS2, name = "Scenario driver") +
+  facet_wrap(scenario ~ Stock, scales = "free") +
+  labs(x = "Recruits / min Recruits", y = "Number of draws") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+ggsave("figures/sockeye_draws_hist_v2.png", width = 12, height = 6.5, dpi = 600)
 
 # ------------------------------------------------------------
 # 10. SUMMARIZE + PLOT

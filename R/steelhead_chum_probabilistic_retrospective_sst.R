@@ -49,7 +49,7 @@ library(tidyverse)
 library(coda)
 
 set.seed(2026)
-N_DRAWS <- 50   # start small, matching the pattern used throughout this pipeline
+N_DRAWS <- 5000   
 LOW_PERIOD_YEARS <- 10
 FINAL_PERIOD_YEARS <- 10
 
@@ -716,6 +716,9 @@ ggplot(lowpoint_summary, aes(ratio, fill = scenario)) +
   theme(legend.position = "bottom")
 
 ggsave("figures/steelhead_chum_ratio_histogram.png", width = 10, height = 4, dpi = 600)
+
+#save(lowpoint_summary, file = "data/steelhead_chum_50000-draws.RData")
+
 
 # ------------------------------------------------------------
 # 10. 40% Smsy BENCHMARK -- per-year actual covariates, averaged output,

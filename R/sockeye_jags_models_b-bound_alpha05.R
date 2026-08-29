@@ -342,7 +342,7 @@ ggplot(sockeye_ayst_summary, aes(Year, mean)) +
   labs(x = "Year", y = "Productivity (alpha, excl. density dependence)") +
   theme_minimal(base_size = 9)
 
-ggsave("figures/sockeye_productivity_by_stock_bayesian.png", width = 14, height = 10, dpi = 600)
+#ggsave("figures/sockeye_productivity_by_stock_bayesian.png", width = 14, height = 10, dpi = 600)
 
 
 
