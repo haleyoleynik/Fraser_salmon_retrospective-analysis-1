@@ -49,7 +49,7 @@ library(tidyverse)
 library(coda)
 
 set.seed(2026)
-N_DRAWS <- 50   # start small, matching the pattern used throughout this pipeline
+N_DRAWS <- 5000   # start small, matching the pattern used throughout this pipeline
 LOW_PERIOD_YEARS <- 10
 MIN_YEARS_BEFORE_LOW_PERIOD <- 10   # same buffer rule as sockeye -- a candidate low
 # window is only considered if it's preceded by a
@@ -972,12 +972,22 @@ ggplot(lowpoint_summary, aes(ratio, fill = scenario)) +
   geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
   scale_fill_manual(values = SCENARIO_COLORS, name = NULL) +
   facet_wrap(~ Stock, scales = "free") +
-  labs(x = "X / Xmin", y = "Number of draws",
-       title = "Distribution of X/Xmin across posterior draws, by stock") +
+  labs(x = "X / Xmin", y = "Number of draws") +
   theme_minimal() +
   theme(legend.position = "bottom")
 
 ggsave("figures/steelhead_chum_ratio_histogram.png", width = 10, height = 4, dpi = 600)
+
+ggplot(lowpoint_summary, aes(ratio, fill = scenario)) +
+  geom_histogram(bins = 20, alpha = 0.6, position = "identity", color = "white") +
+  #geom_vline(xintercept = 1, linetype = "dashed", color = "grey40") +
+  scale_fill_manual(values = SCENARIO_COLORS, name = NULL) +
+  facet_wrap(scenario~ Stock, scales = "free") +
+  labs(x = "X / Xmin", y = "Number of draws") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+ggsave("figures/steelhead_chum_ratio_histogram_harvest_1.png", width = 10, height = 4, dpi = 600)
 
 # ------------------------------------------------------------
 # 10. 40% Smsy BENCHMARK -- per-year actual covariates, averaged output,
@@ -1067,12 +1077,11 @@ ggplot(mc_summary_stats_ratio, aes(x = Stock, y = median, color = scenario)) +
   scale_color_manual(values = SCENARIO_COLORS, name = NULL) +
   scale_shape_manual(name = NULL, values = c("40% Smsy" = 95)) +   # pch 95 = horizontal dash
   scale_y_continuous(trans = "log", labels = scales::comma, breaks = scales::breaks_log(n = 6)) +
-  labs(x = NULL, y = "X / Xmin (posterior median, 90% credible interval, natural log scale)",
-       title = "Chum & steelhead recovery ratio (X / Xmin) by scenario, vs. 40% Smsy benchmark") +
+  labs(x = NULL, y = "Recruits / min Recruits") +
   theme_minimal() +
   theme(legend.position = "bottom")
 
-ggsave("figures/steelhead_chum_ratio_pointrange.png", width = 9, height = 8, dpi = 600)
+ggsave("figures/steelhead_chum_ratio_5000_draws.png", width = 9, height = 8, dpi = 600)
 
 # ------------------------------------------------------------
 # 11. HARVEST COMPARISON, ALL THREE STOCKS -- actual (real, reconstructed)
