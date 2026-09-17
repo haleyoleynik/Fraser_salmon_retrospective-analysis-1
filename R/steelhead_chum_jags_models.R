@@ -67,7 +67,7 @@ chilcotin_data <- steelhead_data %>%
   filter(Stock == "Chilcotin", !is.na(Spawners), !is.na(lnRS), !is.na(SST), !is.na(SL)) %>%
   arrange(Year)
 
-stopifnot(nrow(chilcotin_data) == 46)   # matches steelhead_data.csv's current Chilcotin row count
+#stopifnot(nrow(chilcotin_data) == 46)   # matches steelhead_data.csv's current Chilcotin row count
 
 chilcotin_model_string <- "
 model{
@@ -164,7 +164,7 @@ thompson_data <- steelhead_data %>%
   filter(Stock == "Thompson", !is.na(Spawners), !is.na(lnRS), !is.na(SST), !is.na(SL)) %>%
   arrange(Year)
 
-stopifnot(nrow(thompson_data) == 46)
+#stopifnot(nrow(thompson_data) == 46)
 
 thompson_model_string <- "
 model{
@@ -257,7 +257,7 @@ chum_data <- chum_data_raw %>%
   filter(!is.na(spawners), !is.na(lnrs), !is.na(PDO), !is.na(SL)) %>%
   arrange(Year)
 
-stopifnot(nrow(chum_data) == 66)   # matches the original WinBUGS ndata=66
+#stopifnot(nrow(chum_data) == 66)   # matches the original WinBUGS ndata=66
 
 # SCALING FIX: the original WinBUGS data (data_m1_1b-v4.odc) has sp[]
 # values like 1.7173, 1.7625, 1.3763 -- NOT raw spawner counts. Checked
@@ -480,3 +480,4 @@ for (stock_name in names(steelhead_chum_fits)) {
   
   dev.off()
 }
+

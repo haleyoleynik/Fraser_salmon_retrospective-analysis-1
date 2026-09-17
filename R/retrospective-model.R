@@ -619,7 +619,7 @@ for (i in seq(from = start_i, to = nrow(df))) {
 # no control 
 scenario_1 <- df 
 # with controls 
-#scenario_2 <- df 
+scenario_2 <- df 
 
 # Plots & calculations ------------------------------
 # check columns 
@@ -977,6 +977,44 @@ ggplot(df, aes(Year)) +
   geom_line(aes(y=sh_thompson_killed_per_predator)) +
   geom_line(aes(y=sh_chilcotin_killed_per_predator), col = "red") +
   theme_light()
+
+# chums killed per predator (60 days)
+ggplot(df, aes(Year, chum_killed_per_predator)) +
+  geom_line() +
+  theme_light()
+
+df %>%
+  select(Year, Thompson = sh_thompson_killed_per_predator, Chilcotin = sh_chilcotin_killed_per_predator) %>%
+  mutate(species = "steelhead") %>%
+  pivot_longer(cols = c(Thompson, Chilcotin), names_to = "stock", values_to = "n") %>%
+  bind_rows(df %>%
+              select(Year, n = chum_killed_per_predator) %>%
+              mutate(species = "chum",
+                     stock = "chum")) %>%
+  filter(Year %in% 1950:2020) %>%
+  ggplot(aes(Year, n, color = stock)) +
+  geom_line(size=1) +
+  facet_wrap(vars(species), scales = "free_y") + 
+  scale_color_viridis_d() +
+  labs(y = "Number killed by predator") +
+  theme_minimal()
+
+  
+df %>%
+  select(Year, "Thompson steelhead" = sh_thompson_fraction_killed, "Chilcotin steelhead" = sh_chilcotin_fraction_killed, chum = chum_fraction_killed) %>%
+  pivot_longer(cols = c("Thompson steelhead", "Chilcotin steelhead", chum), names_to = "population", values_to = "fraction") %>%
+  mutate(population = fct_relevel(population, c("chum", "Chilcotin steelhead", "Thompson steelhead"))) %>%
+  filter(Year %in% 1950:2020) %>%
+  ggplot(aes(x = Year, y = fraction, col = population)) +
+  geom_line(size=1) +
+  labs(y = "Proportion of population killed by predators", color = "Population") +
+  ylim(0,1) +
+  scale_color_viridis_d() +
+  theme_minimal() +
+  theme(legend.position = "top")
+
+ggsave("figures/chum_steelhead_predation.png", width = 8, height = 5, dpi = 600)
+
 
 
 # Run scenarios -----------------------------

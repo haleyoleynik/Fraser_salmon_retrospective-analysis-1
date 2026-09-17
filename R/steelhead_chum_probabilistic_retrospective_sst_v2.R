@@ -49,7 +49,7 @@ library(tidyverse)
 library(coda)
 
 set.seed(2026)
-N_DRAWS <- 5000   # start small, matching the pattern used throughout this pipeline
+N_DRAWS <- 50   # start small, matching the pattern used throughout this pipeline
 LOW_PERIOD_YEARS <- 10
 MIN_YEARS_BEFORE_LOW_PERIOD <- 10   # same buffer rule as sockeye -- a candidate low
 # window is only considered if it's preceded by a

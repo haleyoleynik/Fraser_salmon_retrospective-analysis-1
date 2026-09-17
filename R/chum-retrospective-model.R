@@ -1,6 +1,21 @@
 # Chum / steelhead retrospective model — scenario comparisons
 # Haley Oleynik, Murdoch McAllister
-#
+
+# USE steelhead_chum_retrospective_deterministic.R 
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 # Cleaned version. Keeps the three core scenario analyses:
 #   1. Historic harvest rate: SSL control vs. no control
 #   2. Harvest-rate sweep (byrate held fixed): SSL control vs. no control
