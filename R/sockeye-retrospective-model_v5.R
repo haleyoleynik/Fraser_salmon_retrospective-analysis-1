@@ -1,0 +1,1082 @@
+# Sockeye retrospective model — scenario comparisons
+# Adapted from Carl Walters Excel model
+# Haley Oleynik
+#
+# Three covariate-driven scenarios: pinniped, SST, pink salmon. Each runs
+# through the same pipeline so catch-lost and abundance-recovery estimates
+# are directly comparable across drivers.
+#
+# v5 changes (vs v4):
+#   - FIX: covariate selection for AIC-averaged stocks. v4 coalesced
+#     unselected coefficients to 0 *before* testing !is.na(), so every stock
+#     "selected" all 7 covariates. NA * 0 = NA in the matrix product, so an
+#     NA in ANY covariate (e.g. pink pre-1950, seal/NPGO after 2016-17)
+#     wiped out the covariate term for every stock in that year.
+#   - FIX: low_periods is now built before the MSY section that uses it
+#     (v4 referenced it ~300 lines before defining it).
+#   - FIX: all-stock totals only use years where every stock has a value
+#     (v4 summed with na.rm = TRUE, so years with a stock missing were
+#     silently under-counted, e.g. post-2016 when covariates run out).
+#   - FIX: run_retro_model() starts each stock at its first year with usable
+#     covariates/residuals, so a leading NA can't break a cycle line for
+#     the whole series.
+#   - All model runs stored long-format (one tibble with a `scenario`
+#     column) instead of 8 separately named objects.
+#   - ggsave() always gets an explicit plot = .
+#   - NEW: harvest-rate sweep figure (observed / historic harvest rate /
+#     fixed 0-80%), all stocks combined, paired bars by scenario.
+
+library(readr)
+library(dplyr)
+library(tidyr)
+library(purrr)
+library(ggplot2)
+library(patchwork)
+
+# ============================================================
+# CONFIG
+# ============================================================
+
+FIT_YEARS      <- 1952:2019
+LAG_YEARS      <- 4
+COVARIATE_COLS <- c("NPGO", "PDO", "SeaLions", "seal", "adult.sst", "pink", "smolt.sst")
+
+FREEZE_YEAR        <- 1970        # pinniped covariates frozen at this year's level, forward
+SST_BASELINE_YEARS <- 1950:1975   # years used for stock-specific SST long-term mean
+# TRUE  = baseline-mean SST replaces actual SST in EVERY year (v4 behaviour,
+#         so the 1950-1975 years also differ from actual)
+# FALSE = actual SST through the end of the baseline, mean afterwards
+#         (parallels the pinniped freeze)
+SST_SCENARIO_ALL_YEARS <- TRUE
+
+retroU_default   <- 0.3   # retrospective harvest rate cap (*_retro model runs)
+useretro_default <- TRUE
+yrretro_default  <- 1990  # year the retrospective harvest rate cap kicks in
+
+# Harvest-rate sweep (fixed-rate bars)
+HR_SWEEP_RATES      <- seq(0, 0.80, by = 0.05)
+HR_SWEEP_START_YEAR <- yrretro_default   # fixed rate applies from this year on
+
+# Window for mean-yearly-catch summaries. Covariates end in 2016-2017, so
+# 2016 is the last year every stock is reliably complete; this also
+# matches the chum figure (2000-2016) and the COSEWIC cap below.
+CATCH_WINDOW        <- 2000:2016
+MAX_ASSESSMENT_YEAR <- 2016
+
+STOCKS <- c("Birkenhead", "Bowron", "Chilko", "Cultus", "Early Stuart", "Gates",
+            "Late Shuswap", "Late Stuart", "Pitt", "Portage", "Quesnel", "Raft",
+            "Scotch", "Seymour", "Stellako", "Weaver")
+
+# Scenario name -> covariate(s) swapped to their "<var>_scenario" column
+SCENARIOS <- list(
+  "Pinniped scenario" = c("SeaLions", "seal"),
+  "SST scenario"      = c("adult.sst", "smolt.sst"),
+  "Pink scenario"     = "pink"
+)
+
+SCENARIO_COLORS <- c(
+  "Observed"          = "black",
+  "Pinniped scenario" = "#4682B4",
+  "SST scenario"      = "#2E8B57",
+  "Pink scenario"     = "#FF4500"
+)
+SCENARIO_COLORS_NO_OBS <- SCENARIO_COLORS[names(SCENARIOS)]
+
+dir.create("figures", showWarnings = FALSE)
+
+# ============================================================
+# LOAD DATA
+# ============================================================
+
+obs_raw <- read_csv("R/Sockeye Retrospective Shiny App/Walters_model_all-stocks.csv") %>%
+  rename(
+    AdultEscapement = `Adult Escapement`,
+    JackEscapement  = `Jack Escapement`,
+    TotalEscapement = `Total Escapement`,
+    BelowMissionC   = `Below Mission Catch`,
+    AboveMissionC   = `Above Mission Catch`,
+    AlaskaCatch     = `Alaska Catch`,
+    RunSize         = `Run Size`
+  ) %>%
+  mutate(Year = as.integer(Year)) %>%
+  mutate(Stock = trimws(Stock)) %>%
+  filter(!is.na(Year), Stock %in% STOCKS) %>%
+  arrange(Stock, Year)
+
+# Stocks in STOCKS that have no rows in the Walters file (usually a
+# spelling mismatch). All-stock totals are taken over MODELLED_STOCKS.
+missing_stocks <- setdiff(STOCKS, unique(obs_raw$Stock))
+if (length(missing_stocks) > 0) {
+  warning("No rows in the Walters file for: ", paste(missing_stocks, collapse = ", "),
+          " -- check spelling. Stock names in the file are: ",
+          paste(sort(unique(read_csv("R/Sockeye Retrospective Shiny App/Walters_model_all-stocks.csv",
+                                     show_col_types = FALSE)$Stock)), collapse = ", "))
+}
+MODELLED_STOCKS <- intersect(STOCKS, unique(obs_raw$Stock))
+
+covariates_main <- read_csv("Data/sockeye_standardized_covariates.csv") %>%
+  rename(Year = yr) %>%
+  select(Stock, Year, any_of(COVARIATE_COLS))
+
+covariates_pink_wild <- read_csv("Data/sockeye_standardized_covariates_pink-wild.csv") %>%
+  rename(Year = yr) %>%
+  select(Stock, Year, pink_wild)
+
+dredge_models <- read_csv("Data/sockeye_top_models_dredge_wo-aquaculture.csv") %>%
+  mutate(across(c(`(Intercept)`, spawners, all_of(COVARIATE_COLS), deltaAIC), as.numeric))
+
+# AIC-weighted average coefficients (unselected terms count as 0)
+top_models <- dredge_models %>%
+  group_by(Stock) %>%
+  mutate(aic_weight = exp(-0.5 * deltaAIC) / sum(exp(-0.5 * deltaAIC))) %>%
+  summarise(
+    across(c(`(Intercept)`, spawners, all_of(COVARIATE_COLS)),
+           ~ sum(aic_weight * coalesce(.x, 0))),
+    .groups = "drop"
+  )
+
+# Which covariates appear in at least one of a stock's top models. Must be
+# taken from the RAW dredge rows -- after averaging, nothing is NA.
+top_model_selected <- dredge_models %>%
+  group_by(Stock) %>%
+  summarise(across(all_of(COVARIATE_COLS), ~ any(!is.na(.x))), .groups = "drop")
+
+# ============================================================
+# BUILD SCENARIO COVARIATES
+# Each scenario gets its own "<var>_scenario" column(s), joined onto a
+# single `obs` table so any driver can be swapped in at model-run time.
+# ============================================================
+
+## Pinniped: SeaLions/seal frozen at FREEZE_YEAR levels, forward
+no_freeze_year <- covariates_main %>%
+  group_by(Stock) %>%
+  summarise(has_freeze_year = any(Year == FREEZE_YEAR & if_any(c(SeaLions, seal), ~ !is.na(.))),
+            .groups = "drop") %>%
+  filter(!has_freeze_year)
+
+if (nrow(no_freeze_year) > 0) {
+  warning("No ", FREEZE_YEAR, " SeaLions/seal value for stock(s): ",
+          paste(no_freeze_year$Stock, collapse = ", "),
+          " -- pinniped scenario will equal actual for these stocks.")
+}
+
+pinniped_scenario_cov <- covariates_main %>%
+  group_by(Stock) %>%
+  mutate(across(c(SeaLions, seal), function(x) {
+    freeze_val <- x[Year == FREEZE_YEAR]
+    if (length(freeze_val) != 1 || is.na(freeze_val)) x
+    else if_else(Year > FREEZE_YEAR, freeze_val, x)
+  })) %>%
+  ungroup() %>%
+  select(Stock, Year, SeaLions_scenario = SeaLions, seal_scenario = seal)
+
+## Pink: substituted with the wild-only pink series (same standardized scale)
+no_alt_series <- covariates_pink_wild %>%
+  group_by(Stock) %>%
+  summarise(has_alt = any(!is.na(pink_wild)), .groups = "drop") %>%
+  filter(!has_alt)
+
+if (nrow(no_alt_series) > 0) {
+  warning("No pink_wild values for stock(s): ",
+          paste(no_alt_series$Stock, collapse = ", "),
+          " -- pink scenario will equal actual for these stocks.")
+}
+
+pink_scenario_cov <- covariates_pink_wild %>%
+  select(Stock, Year, pink_scenario = pink_wild)
+
+## SST: adult.sst / smolt.sst set to each stock's baseline-period mean
+sst_means <- covariates_main %>%
+  filter(Year %in% SST_BASELINE_YEARS) %>%
+  group_by(Stock) %>%
+  summarise(
+    adult.sst_mean = mean(adult.sst, na.rm = TRUE),
+    smolt.sst_mean = mean(smolt.sst, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+no_sst_mean <- sst_means %>% filter(is.na(adult.sst_mean) | is.na(smolt.sst_mean))
+if (nrow(no_sst_mean) > 0) {
+  warning("No usable ", min(SST_BASELINE_YEARS), "-", max(SST_BASELINE_YEARS),
+          " SST mean for stock(s): ", paste(no_sst_mean$Stock, collapse = ", "))
+}
+
+sst_scenario_cov <- covariates_main %>%
+  select(Stock, Year, adult.sst, smolt.sst) %>%
+  left_join(sst_means, by = "Stock") %>%
+  mutate(
+    swap = SST_SCENARIO_ALL_YEARS | Year > max(SST_BASELINE_YEARS),
+    adult.sst_scenario = if_else(swap, adult.sst_mean, adult.sst),
+    smolt.sst_scenario = if_else(swap, smolt.sst_mean, smolt.sst)
+  ) %>%
+  select(Stock, Year, adult.sst_scenario, smolt.sst_scenario)
+
+obs <- obs_raw %>%
+  left_join(covariates_main,       by = c("Stock", "Year")) %>%
+  left_join(pinniped_scenario_cov, by = c("Stock", "Year")) %>%
+  left_join(pink_scenario_cov,     by = c("Stock", "Year")) %>%
+  left_join(sst_scenario_cov,      by = c("Stock", "Year"))
+
+# ============================================================
+# LATE SHUSWAP (cycle-line model)
+# Modeled by 4-year cycle line (cycle = Year %% 4), not the single
+# stock-wide intercept/slope every other stock uses. Read directly from the
+# cycle-stratified dredge output so a re-dredge is picked up automatically.
+# ============================================================
+
+late_shuswap_dredge <- read_csv("Data/Shuswap_sockeye_dredge-results.csv")
+
+# Stops loudly if a re-dredge produces >1 top model -- decide how to
+# combine them before proceeding.
+late_shuswap_top <- late_shuswap_dredge %>% filter(deltaAIC == min(deltaAIC))
+stopifnot(
+  "Expected exactly one Late Shuswap top model (deltaAIC=0) -- got more than one; decide how to combine them before proceeding." =
+    nrow(late_shuswap_top) == 1
+)
+
+# Intercept: cycle 0 is the reference level; cycles 1-3 add their
+# factor(cycle)N offset (0 if not selected).
+# Spawner slope: no bare "spawners" main effect, only the interaction, so
+# each cycle has its own factor(cycle)N:spawners column.
+late_shuswap_cycle_terms <- tibble(
+  cycle = 0:3,
+  ra = late_shuswap_top[["(Intercept)"]] + c(
+    0,
+    coalesce(late_shuswap_top[["factor(cycle)1"]], 0),
+    coalesce(late_shuswap_top[["factor(cycle)2"]], 0),
+    coalesce(late_shuswap_top[["factor(cycle)3"]], 0)
+  ),
+  rb = -c(
+    late_shuswap_top[["factor(cycle)0:spawners"]],
+    late_shuswap_top[["factor(cycle)1:spawners"]],
+    late_shuswap_top[["factor(cycle)2:spawners"]],
+    late_shuswap_top[["factor(cycle)3:spawners"]]
+  )
+)
+
+late_shuswap_cov_present <- intersect(COVARIATE_COLS, colnames(late_shuswap_top))
+late_shuswap_sel_covs <- late_shuswap_cov_present[
+  !is.na(as.numeric(late_shuswap_top[late_shuswap_cov_present]))
+]
+late_shuswap_cov_coefs <- as.numeric(late_shuswap_top[late_shuswap_sel_covs])
+
+# ============================================================
+# MODEL FUNCTIONS
+# ============================================================
+
+# Stock-recruit terms for a stock: AIC-averaged top-model coefficients, or
+# a plain Ricker fit if the stock has no dredge top model.
+get_top_model_terms <- function(stock_name, fit_df_for_fallback = NULL) {
+  
+  if (stock_name == "Late Shuswap") {
+    # ra/rb vary by cycle -- run_retro_model() pulls them from cycle_terms
+    return(list(ra = NA_real_, rb = NA_real_,
+                sel_covs = late_shuswap_sel_covs, cov_coefs = late_shuswap_cov_coefs,
+                cycle_terms = late_shuswap_cycle_terms))
+  }
+  
+  top_model_row <- top_models %>% filter(Stock == stock_name)
+  
+  if (nrow(top_model_row) == 1) {
+    sel_row  <- top_model_selected %>% filter(Stock == stock_name)
+    sel_covs <- COVARIATE_COLS[unlist(sel_row[COVARIATE_COLS])]
+    list(
+      ra        = top_model_row[["(Intercept)"]],
+      rb        = -top_model_row[["spawners"]],
+      sel_covs  = sel_covs,
+      cov_coefs = as.numeric(top_model_row[sel_covs])
+    )
+  } else {
+    if (is.null(fit_df_for_fallback) || !"lnR_S" %in% names(fit_df_for_fallback)) {
+      stop("No dredge top model for ", stock_name, " and no fit data for a fallback Ricker fit.")
+    }
+    warning("No dredge top model for ", stock_name, " -- using plain Ricker fit.")
+    fit <- lm(lnR_S ~ AdultEscapement, data = fit_df_for_fallback)
+    list(ra = unname(coef(fit)[1]), rb = -unname(coef(fit)[2]),
+         sel_covs = character(0), cov_coefs = numeric(0))
+  }
+}
+
+# Linear-predictor contribution from selected covariates. scenario_vars
+# names which of sel_covs are read from their "<var>_scenario" column.
+compute_cov_term <- function(dat, sel_covs, cov_coefs, scenario_vars = character(0)) {
+  if (length(sel_covs) == 0) return(rep(0, nrow(dat)))
+  cols <- ifelse(sel_covs %in% scenario_vars, paste0(sel_covs, "_scenario"), sel_covs)
+  as.numeric(as.matrix(dat[cols]) %*% cov_coefs)
+}
+
+# Adds per-row ra/rb columns (cycle-specific for Late Shuswap, constant
+# otherwise) so every downstream calculation can work row-wise.
+add_ricker_terms <- function(dat, stock_name, terms) {
+  if (stock_name == "Late Shuswap") {
+    dat %>% mutate(cycle = Year %% 4) %>% left_join(terms$cycle_terms, by = "cycle")
+  } else {
+    dat %>% mutate(ra = terms$ra, rb = terms$rb)
+  }
+}
+
+# Retrospective stock-recruit + harvest projection for one stock.
+# scenario_vars swaps covariates to their scenario column in the forward
+# projection only -- process-error residuals (wt) are always estimated
+# against actual covariates, so a scenario comparison isolates the
+# covariate effect.
+run_retro_model <- function(dat, stock_name, retroU, useretro, yrretro,
+                            scenario_vars = character(0)) {
+  
+  obs2 <- dat %>%
+    arrange(Year) %>%
+    mutate(
+      RunJacks = RunSize - JackEscapement,
+      Catch    = rowSums(cbind(BelowMissionC, AboveMissionC), na.rm = TRUE),
+      Ut_obs   = pmin(0.95, Catch / RunJacks),
+      Ut_obs   = if_else(
+        stock_name == "Late Shuswap" & Year == 2012,  # manual correction to match historical U
+        pmin(0.7, Catch / RunJacks),
+        Ut_obs
+      ),
+      ENS         = pmin(1, pmax(0.0001, AdultEscapement / RunJacks / (1 - Ut_obs))),
+      migmort     = 1 - ENS,
+      AdultReturn = lead(RunJacks, n = LAG_YEARS),
+      lnR_S       = log(AdultReturn / AdultEscapement)
+    )
+  
+  fit_df <- obs2 %>% filter(Year %in% FIT_YEARS, is.finite(lnR_S), is.finite(AdultEscapement))
+  terms  <- get_top_model_terms(stock_name, fit_df)
+  
+  obs3 <- obs2 %>%
+    mutate(
+      cov_term      = compute_cov_term(obs2, terms$sel_covs, terms$cov_coefs),
+      cov_term_proj = compute_cov_term(obs2, terms$sel_covs, terms$cov_coefs, scenario_vars)
+    ) %>%
+    add_ricker_terms(stock_name, terms) %>%
+    mutate(wt = lnR_S - (ra - rb * AdultEscapement + cov_term))
+  
+  # Start at the first brood year with a usable residual + projection term.
+  # A leading NA would otherwise break that cycle line for the entire series.
+  first_ok <- which(is.finite(obs3$wt) & is.finite(obs3$cov_term_proj))[1]
+  if (is.na(first_ok)) stop("No usable brood years for ", stock_name)
+  obs3 <- obs3[first_ok:nrow(obs3), ]
+  
+  n <- nrow(obs3)
+  retroR     <- rep(NA_real_, n)
+  retro_lnRS <- rep(NA_real_, n)
+  retroS     <- rep(NA_real_, n)
+  retroC     <- rep(NA_real_, n)
+  retroU_vec <- if (useretro) if_else(obs3$Year >= yrretro, retroU, obs3$Ut_obs) else obs3$Ut_obs
+  
+  seed <- seq_len(LAG_YEARS)
+  retroR[seed] <- obs3$RunJacks[seed]
+  retroS[seed] <- retroR[seed] * (1 - retroU_vec[seed]) * obs3$ENS[seed]
+  retroC[seed] <- retroR[seed] * retroU_vec[seed]
+  
+  for (i in (LAG_YEARS + 1):n) {
+    j <- i - LAG_YEARS
+    retro_lnRS[j] <- obs3$ra[j] - obs3$rb[j] * retroS[j] + obs3$cov_term_proj[j] + obs3$wt[j]
+    retroR[i] <- retroS[j] * exp(retro_lnRS[j])
+    retroS[i] <- retroR[i] * (1 - retroU_vec[i]) * obs3$ENS[i]
+    retroC[i] <- retroR[i] * retroU_vec[i]
+  }
+  
+  obs3 %>%
+    mutate(retroR = retroR, retro_lnRS = retro_lnRS, retroU = retroU_vec,
+           retroS = retroS, retroC = retroC)
+}
+
+run_scenario_model <- function(dat, retroU, useretro, yrretro, scenario_vars = character(0)) {
+  dat %>%
+    group_by(Stock) %>%
+    group_modify(~ run_retro_model(.x, stock_name = .y$Stock, retroU = retroU,
+                                   useretro = useretro, yrretro = yrretro,
+                                   scenario_vars = scenario_vars)) %>%
+    ungroup()
+}
+
+# Runs the actual-covariate model (scenario = "Actual") plus every
+# scenario in SCENARIOS, stacked long.
+run_all_scenarios <- function(retroU, useretro, yrretro, include_actual = TRUE) {
+  scen <- if (include_actual) c(list(Actual = character(0)), SCENARIOS) else SCENARIOS
+  imap_dfr(scen, ~ run_scenario_model(obs, retroU, useretro, yrretro, scenario_vars = .x) %>%
+             mutate(scenario = .y))
+}
+
+# All-stock total of `value_col` by the grouping variables. A year only
+# gets a total if every modelled stock has a finite value -- otherwise NA,
+# so a missing stock can't masquerade as a drop in catch/abundance.
+sum_complete_stocks <- function(df, value_col, ...) {
+  df %>%
+    group_by(...) %>%
+    summarise(
+      n_stocks = n_distinct(Stock[is.finite(.data[[value_col]])]),
+      total    = sum(.data[[value_col]], na.rm = TRUE),
+      .groups  = "drop"
+    ) %>%
+    mutate(total = if_else(n_stocks == length(MODELLED_STOCKS), total, NA_real_))
+}
+
+# ============================================================
+# RUN MODELS
+# runs_retro : capped retrospective harvest rate (productivity/return/spawner comparisons)
+# runs_hist  : actual historical harvest rate ("catch lost to driver" comparisons)
+# ============================================================
+
+runs_retro <- run_all_scenarios(retroU_default, useretro_default, yrretro_default)
+runs_hist  <- run_all_scenarios(retroU = 0, useretro = FALSE, yrretro = yrretro_default)
+
+# Coverage check: first/last projected year per stock (actual covariates)
+projection_coverage <- runs_hist %>%
+  filter(scenario == "Actual", is.finite(retroC)) %>%
+  group_by(Stock) %>%
+  summarise(first_year = min(Year), last_year = max(Year),
+            n_gaps = (last_year - first_year + 1) - n(), .groups = "drop")
+print(projection_coverage, n = Inf)
+
+if (any(projection_coverage$n_gaps > 0)) {
+  warning("Mid-series gaps in projected catch for: ",
+          paste(projection_coverage$Stock[projection_coverage$n_gaps > 0], collapse = ", "),
+          " -- an NA residual/covariate breaks that cycle line from that year on.")
+}
+
+# ============================================================
+# CATCH LOST TO EACH DRIVER (historical harvest rate)
+# catch_lost = scenario catch - actual catch (positive = catch that would
+# have been available had the driver stayed at its scenario level)
+# ============================================================
+
+catch_lost_by_stock <- runs_hist %>%
+  filter(scenario != "Actual") %>%
+  select(Stock, Year, scenario, catch_scenario = retroC) %>%
+  left_join(runs_hist %>% filter(scenario == "Actual") %>%
+              select(Stock, Year, catch_actual = retroC),
+            by = c("Stock", "Year")) %>%
+  mutate(catch_lost = catch_scenario - catch_actual) %>%
+  arrange(scenario, Stock, Year) %>%
+  group_by(scenario, Stock) %>%
+  mutate(cum_catch_lost = cumsum(replace_na(catch_lost, 0))) %>%
+  ungroup()
+
+catch_lost_totals <- catch_lost_by_stock %>%
+  sum_complete_stocks("catch_lost", scenario, Year) %>%
+  rename(catch_lost = total) %>%
+  filter(!is.na(catch_lost)) %>%
+  arrange(scenario, Year) %>%
+  group_by(scenario) %>%
+  mutate(cum_catch_lost = cumsum(catch_lost)) %>%
+  ungroup()
+
+# ============================================================
+# HARVEST-RATE SWEEP: mean yearly catch & catch lost, all stocks combined
+#   Observed               : observed catch (Below + Above Mission)
+#   Historic harvest rate  : each scenario at the actual historical U
+#   0%-80%                 : each scenario at a fixed U from HR_SWEEP_START_YEAR,
+#                            plus "Historical conditions" (grey; actual
+#                            covariates at that fixed U -- top panel only)
+# Catch lost = scenario catch - catch under historical conditions at the
+# SAME harvest rate (grey bar for fixed rates; actual-covariate model at the
+# actual U for the historic group). This isolates the driver effect: at 0%
+# harvest it is exactly 0. (The chum figure subtracted OBSERVED catch,
+# which mixes the driver effect with the harvest-rate change and gives
+# large negatives at low rates.)
+# No grey bar in the historic-rate group: actual covariates at the actual
+# U reproduce the observed catch, so it would duplicate the black bar.
+# ============================================================
+
+sweep_runs <- map_dfr(HR_SWEEP_RATES, function(u) {
+  run_all_scenarios(retroU = u, useretro = TRUE, yrretro = HR_SWEEP_START_YEAR,
+                    include_actual = TRUE) %>%
+    mutate(harvest_rate = u,
+           scenario = if_else(scenario == "Actual", "Historical conditions", scenario))
+})
+
+HR_COLORS <- c(
+  "Observed"              = "black",
+  "Historical conditions" = "grey55",
+  SCENARIO_COLORS_NO_OBS
+)
+
+HR_LEVELS <- c("Observed", "Historic\nharvest rate", paste0(round(HR_SWEEP_RATES * 100), "%"))
+
+observed_catch_total <- runs_hist %>%
+  filter(scenario == "Actual") %>%
+  sum_complete_stocks("Catch", Year) %>%
+  select(Year, observed_catch = total)
+
+historic_baseline_total <- runs_hist %>%
+  filter(scenario == "Actual") %>%
+  sum_complete_stocks("retroC", Year) %>%
+  transmute(Year, hr_group = "Historic\nharvest rate", baseline_catch = total)
+
+fixed_baseline_total <- sweep_runs %>%
+  filter(scenario == "Historical conditions") %>%
+  sum_complete_stocks("retroC", harvest_rate, Year) %>%
+  transmute(Year, hr_group = paste0(round(harvest_rate * 100), "%"), baseline_catch = total)
+
+catch_baseline <- bind_rows(historic_baseline_total, fixed_baseline_total)
+
+annual_catch_by_hr <- bind_rows(
+  observed_catch_total %>%
+    transmute(Year, scenario = "Observed", hr_group = "Observed", catch = observed_catch),
+  runs_hist %>%
+    filter(scenario != "Actual") %>%
+    sum_complete_stocks("retroC", scenario, Year) %>%
+    transmute(Year, scenario, hr_group = "Historic\nharvest rate", catch = total),
+  sweep_runs %>%
+    sum_complete_stocks("retroC", scenario, harvest_rate, Year) %>%
+    transmute(Year, scenario, hr_group = paste0(round(harvest_rate * 100), "%"), catch = total)
+) %>%
+  filter(Year %in% CATCH_WINDOW) %>%
+  left_join(catch_baseline, by = c("Year", "hr_group")) %>%
+  mutate(catch_lost = if_else(scenario %in% c("Observed", "Historical conditions"),
+                              NA_real_, catch - baseline_catch),
+         hr_group   = factor(hr_group, levels = HR_LEVELS),
+         scenario   = factor(scenario, levels = names(HR_COLORS)))
+
+# Which stock is missing in which window year (empty = all good). Any
+# stock/year listed here blanks that year's all-stock total.
+window_coverage <- bind_rows(
+  runs_hist %>% mutate(run = "historic rate"),
+  sweep_runs %>% mutate(run = paste0(round(harvest_rate * 100), "% fixed")) %>% select(-harvest_rate)
+) %>%
+  select(run, scenario, Stock, Year, retroC) %>%
+  right_join(tidyr::expand_grid(distinct(bind_rows(
+    runs_hist %>% mutate(run = "historic rate"),
+    sweep_runs %>% mutate(run = paste0(round(harvest_rate * 100), "% fixed"))), run, scenario),
+    Stock = MODELLED_STOCKS, Year = CATCH_WINDOW),
+    by = c("run", "scenario", "Stock", "Year")) %>%
+  filter(!is.finite(retroC)) %>%
+  group_by(Stock, scenario, run) %>%
+  summarise(missing_years = paste(sort(Year), collapse = ","), .groups = "drop")
+
+if (nrow(window_coverage) > 0) {
+  warning("Some stock/years in CATCH_WINDOW have no projected catch, so those years drop ",
+          "out of the all-stock means -- see `window_coverage`.")
+  print(distinct(window_coverage, Stock, scenario, missing_years), n = 50)
+}
+
+if (all(is.na(annual_catch_by_hr$catch))) {
+  stop("No year in CATCH_WINDOW has a complete all-stock total. ",
+       "Check `window_coverage`, `projection_coverage` and the stock-name warning above.")
+}
+
+hr_sweep_summary <- annual_catch_by_hr %>%
+  group_by(hr_group, scenario) %>%
+  summarise(
+    n_years         = sum(!is.na(catch)),
+    mean_catch      = mean(catch, na.rm = TRUE),
+    se_catch        = sd(catch, na.rm = TRUE) / sqrt(n_years),
+    mean_catch_lost = mean(catch_lost, na.rm = TRUE),
+    se_catch_lost   = sd(catch_lost, na.rm = TRUE) / sqrt(n_years),
+    .groups = "drop"
+  )
+
+print(hr_sweep_summary, n = Inf)
+
+hr_dodge <- position_dodge(width = 0.85)
+hr_fill  <- scale_fill_manual(values = HR_COLORS, limits = names(HR_COLORS), name = NULL)
+
+# Top panel: fixed-rate groups have 4 bars, the historic group 3. dodge2
+# with preserve = "single" keeps every bar the same width and centred.
+hr_dodge2_col <- position_dodge2(preserve = "single", padding = 0.1)
+hr_dodge2_err <- position_dodge2(preserve = "single", padding = 0.6)
+hr_top_bars   <- filter(hr_sweep_summary, scenario != "Observed")
+
+# (separator lines go after the first bar layer so the x scale is discrete)
+p_hr_catch <- ggplot(mapping = aes(hr_group, fill = scenario)) +
+  geom_col(data = filter(hr_sweep_summary, scenario == "Observed"),
+           aes(y = mean_catch), width = 0.5) +
+  geom_vline(xintercept = 2.5, linetype = "dashed", colour = "grey65", linewidth = 0.4) +
+  geom_errorbar(data = filter(hr_sweep_summary, scenario == "Observed"),
+                aes(ymin = mean_catch - se_catch, ymax = mean_catch + se_catch),
+                width = 0.2, linewidth = 0.4) +
+  geom_col(data = hr_top_bars,
+           aes(y = mean_catch), position = hr_dodge2_col, width = 0.85) +
+  geom_errorbar(data = hr_top_bars,
+                aes(ymin = mean_catch - se_catch, ymax = mean_catch + se_catch),
+                position = hr_dodge2_err, width = 0.85, linewidth = 0.4) +
+  hr_fill +
+  scale_x_discrete(drop = FALSE) +
+  scale_y_continuous(labels = scales::comma, expand = expansion(mult = c(0, 0.05))) +
+  labs(x = NULL, y = "Mean yearly catch") +
+  theme_minimal(base_size = 13) +
+  theme(panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
+
+p_hr_lost <- ggplot(filter(hr_sweep_summary, !scenario %in% c("Observed", "Historical conditions")),
+                    aes(hr_group, mean_catch_lost, fill = scenario)) +
+  geom_col(position = hr_dodge, width = 0.8) +
+  geom_hline(yintercept = 0, linewidth = 0.4) +
+  geom_vline(xintercept = 1.5, linetype = "dashed", colour = "grey65", linewidth = 0.4) +
+  geom_errorbar(aes(ymin = mean_catch_lost - se_catch_lost,
+                    ymax = mean_catch_lost + se_catch_lost),
+                position = hr_dodge, width = 0.25, linewidth = 0.4) +
+  hr_fill +
+  scale_y_continuous(labels = scales::comma) +
+  guides(fill = "none") +   # legend comes from the top panel
+  labs(x = "Harvest rate scenario", y = "Mean yearly catch lost") +
+  theme_minimal(base_size = 13) +
+  theme(panel.grid.major.x = element_blank(), panel.grid.minor = element_blank())
+
+p_hr_sweep <- (p_hr_catch / p_hr_lost) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+p_hr_sweep
+
+ggsave(paste0("figures/sockeye_mean_catch_observed_vs_scenarios_harvest_sweep_",
+              min(CATCH_WINDOW), "-", max(CATCH_WINDOW), ".png"),
+       plot = p_hr_sweep, width = 15, height = 10, dpi = 600, bg = "white")
+
+# ============================================================
+# RETURNS (long format) + COSEWIC helpers + LOW-ABUNDANCE PERIODS
+# Built here because the MSY section below needs low_periods.
+# ============================================================
+
+returns_by_stock <- bind_rows(
+  runs_retro %>% filter(scenario == "Actual") %>%
+    transmute(Stock, Year, scenario = "Observed", Return = RunJacks),
+  runs_retro %>% filter(scenario != "Actual") %>%
+    transmute(Stock, Year, scenario, Return = retroR)
+)
+
+# Generation time (years), per COSEWIC (2017) Technical Summaries.
+# All stocks are 4 years except Pitt (5).
+GENERATION_TIME <- setNames(rep(4, length(STOCKS)), STOCKS)
+GENERATION_TIME["Pitt"] <- 5
+GT_TABLE <- tibble::enframe(GENERATION_TIME, name = "Stock", value = "GT")
+
+# Right-aligned trailing mean; requires a full window of non-NA values.
+trailing_mean <- function(x, width) {
+  out <- rep(NA_real_, length(x))
+  for (i in seq_along(x)) {
+    if (i >= width) {
+      window <- x[(i - width + 1):i]
+      if (all(!is.na(window))) out[i] <- mean(window)
+    }
+  }
+  out
+}
+
+# Each stock's low-abundance PERIOD: the GT-year trailing window (observed
+# series) with the lowest mean return.
+low_periods <- returns_by_stock %>%
+  filter(scenario == "Observed", is.finite(Return)) %>%
+  left_join(GT_TABLE, by = "Stock") %>%
+  arrange(Stock, Year) %>%
+  group_by(Stock) %>%
+  mutate(obs_gen_mean = trailing_mean(Return, width = first(GT))) %>%
+  filter(!is.na(obs_gen_mean)) %>%
+  slice_min(obs_gen_mean, n = 1, with_ties = FALSE) %>%
+  ungroup() %>%
+  transmute(Stock, GT, low_period_end = Year, low_period_start = Year - GT + 1,
+            low_period_mean = obs_gen_mean)
+
+# ============================================================
+# MSY UNDER HIGH VS. LOW PRODUCTIVITY
+# High: 1950-1970. Low: each stock's own low-abundance window (low_periods).
+# MSY = Rmsy - Smsy, Smsy = (a/b)*(0.5-0.07*a), Rmsy = Smsy*exp(a-b*Smsy),
+# computed per year with that year's real covariates (and cycle-matched
+# a/b for Late Shuswap), then averaged over the period.
+# ============================================================
+
+SMSY_PERIOD_START_YEAR <- 1950
+SMSY_PERIOD_END_YEAR   <- 1970
+
+compute_msy_by_stock <- function(stock_name, period_start, period_end) {
+  
+  terms <- get_top_model_terms(stock_name)
+  
+  period_data <- obs %>%
+    filter(Stock == stock_name, Year >= period_start, Year <= period_end) %>%
+    filter(if_all(all_of(terms$sel_covs), ~ !is.na(.))) %>%
+    arrange(Year)
+  if (nrow(period_data) == 0) return(NA_real_)
+  
+  period_data <- add_ricker_terms(period_data, stock_name, terms)
+  a_vec <- period_data$ra + compute_cov_term(period_data, terms$sel_covs, terms$cov_coefs)
+  b_vec <- period_data$rb
+  
+  Smsy_vec <- (a_vec / b_vec) * (0.5 - 0.07 * a_vec)
+  Rmsy_vec <- Smsy_vec * exp(a_vec - b_vec * Smsy_vec)
+  mean(Rmsy_vec - Smsy_vec, na.rm = TRUE)
+}
+
+msy_high_by_stock <- tibble(
+  Stock = STOCKS,
+  MSY   = map_dbl(STOCKS, compute_msy_by_stock,
+                  period_start = SMSY_PERIOD_START_YEAR, period_end = SMSY_PERIOD_END_YEAR)
+)
+
+msy_low_by_stock <- tibble(
+  Stock = STOCKS,
+  MSY   = map_dbl(STOCKS, function(s) {
+    low_p <- low_periods %>% filter(Stock == s)
+    if (nrow(low_p) == 0) return(NA_real_)
+    compute_msy_by_stock(s, low_p$low_period_start, low_p$low_period_end)
+  })
+)
+
+print(msy_high_by_stock, n = Inf)
+print(msy_low_by_stock, n = Inf)
+
+msy_high_avg <- mean(msy_high_by_stock$MSY, na.rm = TRUE)
+msy_low_avg  <- mean(msy_low_by_stock$MSY, na.rm = TRUE)
+
+cat("Average MSY across stocks -- High productivity (1950-1970):", msy_high_avg, "\n")
+cat("Average MSY across stocks -- Low productivity (own low period):", msy_low_avg, "\n")
+
+MSY_LINES <- tibble(
+  label = c("MSY (high productivity)", "MSY (low productivity)"),
+  value = c(msy_high_avg, msy_low_avg)
+)
+MSY_LINETYPES <- c("MSY (high productivity)" = "dashed", "MSY (low productivity)" = "dotted")
+
+# ============================================================
+# PLOTS: productivity and catch lost through time
+# ============================================================
+
+plot_productivity_compare <- function(scenario_label, stocks = NULL) {
+  df <- runs_retro %>%
+    filter(scenario %in% c("Actual", scenario_label)) %>%
+    select(Stock, Year, scenario, lnRS = retro_lnRS)
+  if (!is.null(stocks)) df <- df %>% filter(Stock %in% stocks)
+  
+  ggplot(df, aes(Year, lnRS, color = scenario, linetype = scenario)) +
+    geom_line(linewidth = 1, alpha = 0.6) +
+    facet_wrap(~ Stock, scales = "free_y", ncol = 2) +
+    scale_color_manual(values = c(Actual = "grey30", SCENARIO_COLORS_NO_OBS)) +
+    labs(x = "Year", y = "ln(R/S)", color = NULL, linetype = NULL,
+         title = paste("Productivity:", scenario_label, "vs. actual")) +
+    theme_minimal() +
+    theme(legend.position = "bottom")
+}
+
+plot_catch_lost_cumulative <- function(scenario_label) {
+  ggplot(filter(catch_lost_by_stock, scenario == scenario_label), aes(Year, cum_catch_lost)) +
+    geom_area(fill = SCENARIO_COLORS[[scenario_label]], alpha = 0.2) +
+    geom_line(linewidth = 1, color = SCENARIO_COLORS[[scenario_label]]) +
+    facet_wrap(~ Stock, scales = "free_y") +
+    scale_y_continuous(labels = scales::comma) +
+    labs(x = "Year", y = "Cumulative catch lost",
+         title = paste("Catch lost -", scenario_label, "- by stock")) +
+    theme_minimal()
+}
+
+walk(names(SCENARIOS), ~ print(plot_productivity_compare(.x)))
+walk(names(SCENARIOS), ~ print(plot_catch_lost_cumulative(.x)))
+
+p_cum_lost <- ggplot(catch_lost_totals, aes(Year, cum_catch_lost, color = scenario)) +
+  geom_line(linewidth = 1.2) +
+  scale_color_manual(values = SCENARIO_COLORS_NO_OBS) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = "Year", y = "Cumulative catch lost", color = "Scenario driver",
+       title = "Cumulative catch lost across all stocks, by scenario driver") +
+  theme_minimal()
+p_cum_lost
+ggsave("figures/catch_lost_by_scenario_driver.png", plot = p_cum_lost,
+       width = 10, height = 6, dpi = 600, bg = "white")
+
+# ============================================================
+# AVERAGE YEARLY CATCH LOST over CATCH_WINDOW (historical harvest rate)
+# ============================================================
+
+catch_lost_recent <- catch_lost_totals %>% filter(Year %in% CATCH_WINDOW)
+
+catch_lost_recent_summary <- catch_lost_recent %>%
+  group_by(scenario) %>%
+  summarise(
+    mean_catch_lost = mean(catch_lost),
+    se_catch_lost   = sd(catch_lost) / sqrt(n()),
+    .groups = "drop"
+  )
+
+msy_hlines <- geom_hline(data = MSY_LINES, aes(yintercept = value, linetype = label),
+                         color = "black", linewidth = 0.7)
+
+p1 <- ggplot(catch_lost_recent_summary,
+             aes(x = reorder(scenario, -mean_catch_lost), y = mean_catch_lost, fill = scenario)) +
+  geom_col(width = 0.6) +
+  geom_errorbar(aes(ymin = mean_catch_lost - se_catch_lost,
+                    ymax = mean_catch_lost + se_catch_lost), width = 0.15) +
+  msy_hlines +
+  scale_fill_manual(values = SCENARIO_COLORS_NO_OBS) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_linetype_manual(name = NULL, values = MSY_LINETYPES) +
+  labs(x = NULL, y = "Mean yearly catch lost", fill = "Scenario driver") +
+  theme_minimal() +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggsave("figures/mean_catch_lost_by_scenario_2000-present_v2.png", plot = p1,
+       width = 8, height = 5.5, dpi = 600, bg = "white")
+
+p2 <- ggplot(catch_lost_recent,
+             aes(x = reorder(scenario, catch_lost, FUN = median), y = catch_lost, fill = scenario)) +
+  geom_boxplot(width = 0.5, outlier.shape = 21) +
+  msy_hlines +
+  scale_fill_manual(values = SCENARIO_COLORS_NO_OBS) +
+  scale_y_continuous(labels = scales::comma) +
+  scale_linetype_manual(name = NULL, values = MSY_LINETYPES) +
+  labs(x = NULL, y = "Yearly catch lost", fill = "Scenario driver") +
+  theme_minimal() +
+  theme(legend.position = "none", axis.text.x = element_text(angle = 30, hjust = 1))
+
+ggsave("figures/catch_lost_boxplot_by_scenario_2000-present_v2.png", plot = p2,
+       width = 8, height = 5.5, dpi = 600, bg = "white")
+
+# Note: negative values are dropped under the sqrt transform
+p2.2 <- p2 +
+  scale_y_continuous(labels = scales::comma, trans = scales::sqrt_trans(),
+                     breaks = scales::breaks_pretty(n = 8)) +
+  labs(y = "Yearly catch lost (sqrt transformed)") +
+  theme(legend.position = "right")
+
+p_box_pair <- p2 | p2.2
+p_box_pair
+ggsave("figures/catch_lost_sqrt2_v2.png", plot = p_box_pair,
+       width = 11.5, height = 5.5, dpi = 600, bg = "white")
+
+# ============================================================
+# RETURN TRAJECTORIES: observed vs. all scenarios
+# ============================================================
+
+returns_total <- returns_by_stock %>%
+  sum_complete_stocks("Return", scenario, Year) %>%
+  rename(Return = total) %>%
+  mutate(scenario = factor(scenario, levels = names(SCENARIO_COLORS)))
+
+p_ret_total <- ggplot(mapping = aes(Year, Return, color = scenario)) +
+  geom_line(data = filter(returns_total, scenario == "Observed"), linewidth = 1.3) +
+  geom_line(data = filter(returns_total, scenario != "Observed"), linewidth = 1, alpha = 0.6) +
+  scale_color_manual(values = SCENARIO_COLORS) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = "Year", y = "Total return (all stocks)", color = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+p_ret_total
+ggsave("figures/return_trajectories_all_scenarios_total.png", plot = p_ret_total,
+       width = 10, height = 6, dpi = 600, bg = "white")
+
+returns_by_stock_plot <- returns_by_stock %>%
+  mutate(scenario = factor(scenario, levels = names(SCENARIO_COLORS)))
+
+p_ret_stock <- ggplot(mapping = aes(Year, Return, color = scenario)) +
+  geom_line(data = filter(returns_by_stock_plot, scenario == "Observed"), linewidth = 1) +
+  geom_line(data = filter(returns_by_stock_plot, scenario != "Observed"), linewidth = 0.7, alpha = 0.7) +
+  facet_wrap(~ Stock, scales = "free_y") +
+  scale_color_manual(values = SCENARIO_COLORS) +
+  scale_y_continuous(labels = scales::comma) +
+  labs(x = "Year", y = "Return", color = NULL,
+       title = "Observed vs. scenario-reconstructed returns, by stock") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+p_ret_stock
+ggsave("figures/return_trajectories_all_scenarios_by_stock.png", plot = p_ret_stock,
+       width = 14, height = 10, dpi = 600, bg = "white")
+
+# ============================================================
+# COSEWIC-STYLE STATUS CLASSIFICATION
+# Approximate re-application of COSEWIC's quantitative thresholds
+# (Criteria A/C/D) -- comparative indicators across scenarios, not a
+# formal reassessment.
+# ============================================================
+
+# Most severe status implied by any criterion. Special Concern isn't
+# distinguished from Not at Risk (qualitative in the source report).
+classify_status <- function(decline_pct, current_abundance) {
+  case_when(
+    is.na(decline_pct) & is.na(current_abundance) ~ NA_character_,
+    (!is.na(decline_pct) & decline_pct >= 0.50) |
+      (!is.na(current_abundance) & current_abundance < 2500)  ~ "Endangered",
+    (!is.na(decline_pct) & decline_pct >= 0.30) |
+      (!is.na(current_abundance) & current_abundance < 10000) ~ "Threatened",
+    TRUE ~ "Not at Risk / Special Concern"
+  )
+}
+
+status_all <- returns_by_stock %>%
+  left_join(GT_TABLE, by = "Stock") %>%
+  arrange(scenario, Stock, Year) %>%
+  group_by(scenario, Stock) %>%
+  mutate(
+    gen_mean          = trailing_mean(Return, width = first(GT)),
+    gen_mean_3gen_ago = lag(gen_mean, n = 3 * first(GT)),
+    decline_pct       = 1 - gen_mean / gen_mean_3gen_ago
+  ) %>%
+  ungroup() %>%
+  mutate(status = classify_status(decline_pct, gen_mean))
+
+# Capped at MAX_ASSESSMENT_YEAR for a contemporaneous comparison ("given
+# what was known as of the 2017 report, would this driver have changed the
+# designation"). The uncapped version answers "status today".
+latest_status <- function(df) {
+  df %>%
+    filter(!is.na(status)) %>%
+    group_by(Stock, scenario) %>%
+    slice_max(Year, n = 1) %>%
+    ungroup() %>%
+    select(Stock, scenario, Year, gen_mean, decline_pct, status)
+}
+status_summary_latest          <- latest_status(filter(status_all, Year <= MAX_ASSESSMENT_YEAR))
+status_summary_latest_uncapped <- latest_status(status_all)
+
+# Stocks COSEWIC (2017) designated Endangered
+COSEWIC_ENDANGERED_STOCKS <- c("Bowron", "Weaver", "Quesnel", "Early Stuart",
+                               "Late Stuart", "Portage", "Cultus")
+
+status_comparison_table <- status_summary_latest %>%
+  filter(Stock %in% COSEWIC_ENDANGERED_STOCKS) %>%
+  select(Stock, scenario, status) %>%
+  pivot_wider(names_from = scenario, values_from = status) %>%
+  arrange(Stock)
+
+print(status_comparison_table)
+
+# ============================================================
+# % ABUNDANCE INCREASE OVER LOW-ABUNDANCE PERIODS, BY SCENARIO
+# ============================================================
+
+pct_increase_by_year <- returns_by_stock %>%
+  filter(scenario != "Observed") %>%
+  rename(Return_scenario = Return) %>%
+  left_join(returns_by_stock %>% filter(scenario == "Observed") %>%
+              select(Stock, Year, Return_observed = Return),
+            by = c("Stock", "Year")) %>%
+  mutate(pct_increase = 100 * (Return_scenario - Return_observed) / Return_observed)
+
+pct_increase_over_low_period <- returns_by_stock %>%
+  filter(scenario != "Observed") %>%
+  inner_join(low_periods, by = "Stock") %>%
+  filter(Year >= low_period_start, Year <= low_period_end) %>%
+  group_by(Stock, scenario, low_period_start, low_period_end, low_period_mean) %>%
+  summarise(scenario_period_mean = mean(Return, na.rm = TRUE), .groups = "drop") %>%
+  mutate(pct_increase = 100 * (scenario_period_mean - low_period_mean) / low_period_mean) %>%
+  arrange(Stock, scenario)
+
+print(pct_increase_over_low_period)
+
+recovery_summary <- status_comparison_table %>%
+  left_join(
+    pct_increase_over_low_period %>%
+      select(Stock, scenario, pct_increase) %>%
+      pivot_wider(names_from = scenario, values_from = pct_increase, names_prefix = "pct_increase_"),
+    by = "Stock"
+  )
+
+print(recovery_summary)
+
+p_pct_low <- ggplot(pct_increase_over_low_period,
+                    aes(x = reorder(Stock, -pct_increase), y = pct_increase, fill = scenario)) +
+  geom_col(position = position_dodge(width = 0.7), width = 0.6) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey40") +
+  scale_y_continuous(labels = scales::comma) +
+  scale_fill_manual(values = SCENARIO_COLORS_NO_OBS) +
+  labs(x = NULL, y = "% increase in mean abundance over low-abundance period",
+       fill = "Scenario driver",
+       title = "Potential abundance recovery over each stock's historical low-abundance period") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 40, hjust = 1))
+p_pct_low
+ggsave("figures/pct_increase_over_low_period_by_scenario.png", plot = p_pct_low,
+       width = 10, height = 6, dpi = 600, bg = "white")
+
+p_pct_time <- ggplot(pct_increase_by_year, aes(Year, pct_increase, color = scenario)) +
+  geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_rect(data = low_periods,
+            aes(xmin = low_period_start, xmax = low_period_end, ymin = -Inf, ymax = Inf),
+            inherit.aes = FALSE, fill = "grey70", alpha = 0.25) +
+  geom_line(linewidth = 0.8, alpha = 0.8) +
+  facet_wrap(~ Stock, scales = "free_y") +
+  scale_color_manual(values = SCENARIO_COLORS_NO_OBS) +
+  labs(x = "Year", y = "% increase in abundance vs. observed", color = "Scenario driver",
+       title = "Counterfactual abundance gain over time, by stock",
+       subtitle = "Shaded band marks each stock's historical low-abundance period (worst generation-length window)") +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+p_pct_time
+ggsave("figures/pct_increase_over_time_by_scenario.png", plot = p_pct_time,
+       width = 14, height = 10, dpi = 600, bg = "white")
+
+status_plot_df <- status_summary_latest %>%
+  filter(Stock %in% COSEWIC_ENDANGERED_STOCKS) %>%
+  mutate(
+    scenario = factor(scenario, levels = names(SCENARIO_COLORS)),
+    status   = factor(status, levels = c("Endangered", "Threatened", "Not at Risk / Special Concern"))
+  )
+
+p_status <- ggplot(status_plot_df, aes(scenario, Stock, fill = status)) +
+  geom_tile(color = "white", linewidth = 0.5) +
+  scale_fill_manual(values = c(
+    "Endangered" = "#B22222",
+    "Threatened" = "#E8A33D",
+    "Not at Risk / Special Concern" = "#4C9A5B"
+  )) +
+  labs(x = NULL, y = NULL, fill = "Status") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 20, hjust = 1))
+p_status
+ggsave("figures/status_by_scenario_heatmap.png", plot = p_status,
+       width = 9, height = 6, dpi = 600, bg = "white")
+
+# ============================================================
+# DIAGNOSTICS
+#
+# diagnose_stock: spawners/return/productivity trajectory for one stock
+# across scenarios, plus where the pinniped freeze-year value sits in the
+# historical covariate range (extrapolation risk). Useful when a stock's
+# status worsens under a scenario despite a favourable coefficient: the
+# model is recursive, so a productivity boost raises escapement, which
+# feeds density dependence next generation; a stock with large |rb|
+# relative to ra can overshoot and crash (Ricker overcompensation). Also
+# check whether slice_max(Year) lands on the down-swing of such a cycle.
+#
+# inspect_status_trajectory: year-by-year gen_mean/decline_pct/status.
+# ============================================================
+
+diagnose_stock <- function(stock_name) {
+  
+  traj <- runs_retro %>%
+    filter(Stock == stock_name) %>%
+    mutate(scenario = if_else(scenario == "Actual", "Observed", scenario))
+  diag_colors <- scale_color_manual(values = SCENARIO_COLORS)
+  
+  p_s <- ggplot(traj, aes(Year, retroS, color = scenario)) +
+    geom_line(linewidth = 0.8) + diag_colors +
+    labs(y = "Spawners (retroS)", title = paste(stock_name, "- spawners by scenario")) +
+    theme_minimal()
+  p_r <- ggplot(traj, aes(Year, retroR, color = scenario)) +
+    geom_line(linewidth = 0.8) + diag_colors +
+    labs(y = "Return (retroR)", title = paste(stock_name, "- returns by scenario")) +
+    theme_minimal()
+  p_p <- ggplot(traj, aes(Year, retro_lnRS, color = scenario)) +
+    geom_line(linewidth = 0.8) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey50") +
+    diag_colors +
+    labs(y = "ln(R/S)", title = paste(stock_name, "- productivity by scenario")) +
+    theme_minimal()
+  
+  p_diag <- (p_s / p_r / p_p) + plot_layout(guides = "collect") & theme(legend.position = "bottom")
+  print(p_diag)
+  ggsave(paste0("figures/diagnostic_", tolower(gsub(" ", "_", stock_name)), "_trajectories.png"),
+         plot = p_diag, width = 9, height = 10, dpi = 600, bg = "white")
+  
+  covariates_main %>%
+    filter(Stock == stock_name) %>%
+    summarise(
+      SeaLions_hist_min  = min(SeaLions, na.rm = TRUE),
+      SeaLions_hist_max  = max(SeaLions, na.rm = TRUE),
+      SeaLions_at_freeze = SeaLions[Year == FREEZE_YEAR],
+      seal_hist_min      = min(seal, na.rm = TRUE),
+      seal_hist_max      = max(seal, na.rm = TRUE),
+      seal_at_freeze     = seal[Year == FREEZE_YEAR]
+    ) %>%
+    print()
+  
+  invisible(traj)
+}
+
+inspect_status_trajectory <- function(stock_name, scenario_label = "Observed") {
+  status_all %>%
+    filter(Stock == stock_name, scenario == scenario_label) %>%
+    select(Year, gen_mean, decline_pct, status) %>%
+    print(n = Inf)
+}
+
+diagnose_stock("Raft")
+inspect_status_trajectory("Late Stuart")
